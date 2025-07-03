@@ -2,44 +2,64 @@
 
 namespace Triyatna\Vipayment;
 
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 
 class VipaymentClient
 {
-    protected string $apiId;
-    protected string $apiKey;
-    protected string $baseUrl;
-
-    public function __construct(string $apiId, string $apiKey, string $baseUrl)
-    {
-        $this->apiId = $apiId;
-        $this->apiKey = $apiKey;
-        $this->baseUrl = $baseUrl;
-    }
+    public function __construct(
+        protected readonly string $apiId,
+        protected readonly string $apiKey,
+        protected readonly string $baseUrl
+    ) {}
 
     /**
-     * Send a request to the API.
+     * Mengirim request ke API dan mengembalikan response api.
      */
-    protected function sendRequest(string $endpoint, array $params = []): array
+    protected function sendRequest(string $endpoint, array $params = []): VipaymentResponse
     {
         $payload = array_merge([
             'key' => $this->apiKey,
             'sign' => md5($this->apiId . $this->apiKey),
         ], $params);
 
-        $response = Http::asForm()->post($this->baseUrl . $endpoint, $payload);
+        try {
+            $response = Http::asForm()->post($this->baseUrl . $endpoint, $payload);
 
-        return $response->json();
+            $response->throw();
+
+            $responseData = $response->json();
+
+
+            if (is_null($responseData)) {
+                return new VipaymentResponse(false, null, 'API returned a non-JSON or empty response.', $response);
+            }
+
+            if (isset($responseData['result']) && $responseData['result'] === false) {
+                return new VipaymentResponse(false, $responseData['data'] ?? null, $responseData['message'] ?? 'Request failed.', $response);
+            }
+            return new VipaymentResponse(true, $responseData['data'] ?? $responseData, $responseData['message'] ?? 'Request successful.', $response);
+        } catch (ConnectionException $e) {
+            return new VipaymentResponse(false, null, 'Connection Error: ' . $e->getMessage());
+        } catch (RequestException $e) {
+            $errorData = $e->response->json();
+            $errorMessage = $errorData['message'] ?? 'An unknown API error occurred.';
+            return new VipaymentResponse(false, $errorData, "API Error: {$errorMessage} (Status: {$e->response->status()})", $e->response);
+        } catch (\Exception $e) {
+            return new VipaymentResponse(false, null, 'An unexpected error occurred: ' . $e->getMessage());
+        }
     }
 
+
     // ----------- ACCOUNT -----------
-    public function getProfile(): array
+    public function getProfile(): VipaymentResponse
     {
         return $this->sendRequest('profile');
     }
 
     // ----------- GAME-FEATURE -----------
-    public function getGameServices(?string $filterType = null, ?string $filterValue = null, ?string $filterStatus = null): array
+    public function getGameServices(?string $filterType = null, ?string $filterValue = null, ?string $filterStatus = null): VipaymentResponse
     {
         $params = ['type' => 'services'];
         if ($filterType) $params['filter_type'] = $filterType;
@@ -49,7 +69,7 @@ class VipaymentClient
         return $this->sendRequest('game-feature', $params);
     }
 
-    public function createGameOrder(string $service, string $dataNo, ?string $dataZone = null): array
+    public function createGameOrder(string $service, string $dataNo, ?string $dataZone = null): VipaymentResponse
     {
         $params = [
             'type' => 'order',
@@ -61,7 +81,7 @@ class VipaymentClient
         return $this->sendRequest('game-feature', $params);
     }
 
-    public function createJokiOrder(string $service, string $emailUser, string $password, string $additionalData, int $quantity): array
+    public function createJokiOrder(string $service, string $emailUser, string $password, string $additionalData, int $quantity): VipaymentResponse
     {
         return $this->sendRequest('game-feature', [
             'type' => 'order',
@@ -73,7 +93,7 @@ class VipaymentClient
         ]);
     }
 
-    public function checkGameOrderStatus(?string $trxId = null, ?int $limit = null): array
+    public function checkGameOrderStatus(?string $trxId = null, ?int $limit = null): VipaymentResponse
     {
         $params = ['type' => 'status'];
         if ($trxId) $params['trxid'] = $trxId;
@@ -82,7 +102,7 @@ class VipaymentClient
         return $this->sendRequest('game-feature', $params);
     }
 
-    public function getNickname(string $gameCode, string $userId, ?string $zoneId = null): array
+    public function getNickname(string $gameCode, string $userId, ?string $zoneId = null): VipaymentResponse
     {
         $params = [
             'type' => 'get-nickname',
@@ -95,7 +115,7 @@ class VipaymentClient
     }
 
     // ----------- PREPAID -----------
-    public function getPrepaidServices(?string $filterType = null, ?string $filterValue = null): array
+    public function getPrepaidServices(?string $filterType = null, ?string $filterValue = null): VipaymentResponse
     {
         $params = ['type' => 'services'];
         if ($filterType) $params['filter_type'] = $filterType;
@@ -104,7 +124,7 @@ class VipaymentClient
         return $this->sendRequest('prepaid', $params);
     }
 
-    public function createPrepaidOrder(string $service, string $dataNo): array
+    public function createPrepaidOrder(string $service, string $dataNo): VipaymentResponse
     {
         return $this->sendRequest('prepaid', [
             'type' => 'order',
@@ -113,12 +133,21 @@ class VipaymentClient
         ]);
     }
 
-    public function checkPrepaidOrderStatus(?string $trxId = null, ?int $limit = null): array
+    public function checkPrepaidOrderStatus(?string $trxId = null, ?int $limit = null): VipaymentResponse
     {
         $params = ['type' => 'status'];
         if ($trxId) $params['trxid'] = $trxId;
         if ($limit) $params['limit'] = $limit;
 
         return $this->sendRequest('prepaid', $params);
+    }
+
+    public function webhookValidate(string $signatureHeader): bool
+    {
+        if (empty($signatureHeader)) {
+            return false;
+        }
+        $expectedSignature = md5($this->apiId . $this->apiKey);
+        return hash_equals($expectedSignature, $signatureHeader);
     }
 }
